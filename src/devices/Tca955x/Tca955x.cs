@@ -137,21 +137,6 @@ namespace Iot.Device.Tca955x
         /// </summary>
         public void WriteByte(byte register, byte value) => InternalWriteByte(register, value);
 
-        /// <inheritdoc/>
-        protected override void Dispose(bool disposing)
-        {
-            if (_shouldDispose)
-            {
-                _controller?.Dispose();
-                _controller = null;
-            }
-
-            _pinValues.Clear();
-            _busDevice?.Dispose();
-            _busDevice = null!;
-            base.Dispose(disposing);
-        }
-
         /// <summary>
         /// Returns the value of the interrupt pin if configured
         /// </summary>
@@ -433,26 +418,35 @@ namespace Iot.Device.Tca955x
             {
                 if (_interruptPins.Count > 0)
                 {
-                    foreach (var interruptPin in _interruptPins)
+                    Span<PinValuePair> pinValuePairs = stackalloc PinValuePair[_interruptPins.Count];
+                    int i = 0;
+                    foreach (var kvp in _interruptPins)
                     {
-                        PinValue newValue = Read(interruptPin.Key);
-                        PinValue lastValue = _interruptLastInputValues[interruptPin.Key];
+                        pinValuePairs[i++] = new PinValuePair(kvp.Key, default);
+                    }
 
-                        // We must calculate both edges, as the interrupt may have been triggered for
-                        // a pin that has not changed (isRisingEdge and isFallingEdge both false)
+                    Read(pinValuePairs);
+
+                    for (i = 0; i < pinValuePairs.Length; i++)
+                    {
+                        int pin = pinValuePairs[i].PinNumber;
+                        PinValue newValue = pinValuePairs[i].PinValue;
+                        PinValue lastValue = _interruptLastInputValues[pin];
+                        var eventTypes = _interruptPins[pin];
+
                         bool isRisingEdge = lastValue == PinValue.Low && newValue == PinValue.High;
                         bool isFallingEdge = lastValue == PinValue.High && newValue == PinValue.Low;
 
-                        if (interruptPin.Value.HasFlag(PinEventTypes.Rising) && isRisingEdge)
+                        if (eventTypes.HasFlag(PinEventTypes.Rising) && isRisingEdge)
                         {
-                            CallHandlerOnPin(interruptPin.Key, PinEventTypes.Rising);
+                            CallHandlerOnPin(pin, PinEventTypes.Rising);
                         }
-                        else if (interruptPin.Value.HasFlag(PinEventTypes.Falling) && isFallingEdge)
+                        else if (eventTypes.HasFlag(PinEventTypes.Falling) && isFallingEdge)
                         {
-                            CallHandlerOnPin(interruptPin.Key, PinEventTypes.Falling);
+                            CallHandlerOnPin(pin, PinEventTypes.Falling);
                         }
 
-                        _interruptLastInputValues[interruptPin.Key] = newValue;
+                        _interruptLastInputValues[pin] = newValue;
                     }
                 }
             }
@@ -573,7 +567,7 @@ namespace Iot.Device.Tca955x
             (mode == PinMode.Input || mode == PinMode.Output || mode == PinMode.InputPullUp);
 
         /// <inheritdoc/>
-        public new void Dispose()
+        protected override void Dispose(bool disposing)
         {
             if (_shouldDispose)
             {
@@ -588,6 +582,8 @@ namespace Iot.Device.Tca955x
                     _controller.UnregisterCallbackForPinValueChangedEvent(_interrupt, InterruptHandler);
                 }
             }
+
+            _busDevice?.Dispose();
 
             base.Dispose(true);
         }
