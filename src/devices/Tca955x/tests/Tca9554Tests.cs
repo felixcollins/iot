@@ -27,10 +27,12 @@ namespace Iot.Device.Tca955x.Tests
             _controller = new GpioController(_driver.Object);
             _device.Setup(x => x.ConnectionSettings).Returns(new I2cConnectionSettings(0, Tca9554.DefaultI2cAddress));
             _deviceWithBadAddress.Setup(x => x.ConnectionSettings).Returns(new I2cConnectionSettings(0, Tca9554.DefaultI2cAddress + Tca9554.AddressRange + 1));
+        }
+
         [Fact]
         public void CreateWithInterrupt()
+        {
             var testee = new Tca9554(_device.Object, 10, _controller);
-
         }
 
         [Fact]
@@ -136,7 +138,7 @@ namespace Iot.Device.Tca955x.Tests
                 tcaController.RegisterCallbackForPinValueChangedEvent(1, PinEventTypes.Rising, Callback);
             });
         }
-        
+
         [Fact]
         public void TestReadOfIllegalPinThrows()
         {
