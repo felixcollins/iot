@@ -14,7 +14,7 @@ namespace Iot.Device.Tca955x
     /// <summary>
     /// Base class for the Tca55x I2C I/O Expander
     /// </summary>
-    public abstract class Tca955x : GpioDriver, IDisposable
+    public abstract class Tca955x : GpioDriver, IGpioDriverBlockAccess
     {
         private readonly int _interrupt;
         private readonly Dictionary<int, PinValue> _pinValues = new Dictionary<int, PinValue>();
@@ -43,12 +43,17 @@ namespace Iot.Device.Tca955x
         public const byte AddressRange = 7;
 
         /// <summary>
+        /// Represents the number of bits in a byte.
+        /// </summary>
+        public const int BitsPerByte = 8;
+
+        /// <summary>
         /// Constructor for the Tca9555 I2C I/O Expander.
         /// </summary>
         /// <param name="device">The I2C device used for communication.</param>
         /// <param name="interrupt">The input pin number that is connected to the interrupt.</param>
         /// <param name="gpioController">The controller for the reset and interrupt pins. If not specified, the default controller will be used.</param>
-        /// <param name="shouldDispose">True to dispose the Gpio Controller.</param>
+        /// <param name="shouldDispose">True to dispose the <paramref name="gpioController"/> when this object is disposed</param>
         protected Tca955x(I2cDevice device, int interrupt = -1, GpioController? gpioController = null, bool shouldDispose = true)
         {
             _busDevice = device;
@@ -257,23 +262,43 @@ namespace Iot.Device.Tca955x
         /// <summary>
         /// Reads the value of a set of pins
         /// </summary>
-        protected void Read(Span<PinValuePair> pinValuePairs)
+        public void Read(Span<PinValuePair> pinValuePairs)
         {
             lock (_interruptHandlerLock)
             {
-                (uint pins, _) = new PinVector32(pinValuePairs);
-                if ((pins >> PinCount) > 0)
-                {
-                    ThrowBadPin(nameof(pinValuePairs));
-                }
+                byte? lowReg = null;
+                byte? highReg = null;
 
                 for (int i = 0; i < pinValuePairs.Length; i++)
                 {
                     int pin = pinValuePairs[i].PinNumber;
-                    byte register = GetRegisterIndex(pin, Register.InputPort);
-                    byte result = InternalReadByte(register);
-                    pinValuePairs[i] = new PinValuePair(pin, result & (1 << GetBitNumber(pin)));
-                    _pinValues[pin] = pinValuePairs[i].PinValue;
+                    PinValue value = PinValue.Low;
+
+                    if (pin >= 0 && pin < BitsPerByte)
+                    {
+                        if (lowReg == null)
+                        {
+                            lowReg = InternalReadByte(GetRegisterIndex(0, Register.InputPort));
+                        }
+
+                        value = (lowReg.Value & (1 << GetBitNumber(pin))) != 0 ? PinValue.High : PinValue.Low;
+                    }
+                    else if (PinCount > BitsPerByte && pin >= BitsPerByte && pin < 2 * BitsPerByte)
+                    {
+                        if (highReg == null)
+                        {
+                            highReg = InternalReadByte(GetRegisterIndex(BitsPerByte, Register.InputPort));
+                        }
+
+                        value = (highReg.Value & (1 << GetBitNumber(pin))) != 0 ? PinValue.High : PinValue.Low;
+                    }
+                    else
+                    {
+                        ThrowBadPin(nameof(pinValuePairs));
+                    }
+
+                    pinValuePairs[i] = new PinValuePair(pin, value);
+                    _pinValues[pin] = value;
                 }
             }
         }
@@ -300,8 +325,11 @@ namespace Iot.Device.Tca955x
         /// <summary>
         /// Writes values to a set of pins
         /// </summary>
-        protected void Write(ReadOnlySpan<PinValuePair> pinValuePairs)
+        public void Write(ReadOnlySpan<PinValuePair> pinValuePairs)
         {
+            bool lowChanged = false;
+            bool highChanged = false;
+
             lock (_interruptHandlerLock)
             {
                 (uint mask, uint newBits) = new PinVector32(pinValuePairs);
@@ -317,12 +345,32 @@ namespace Iot.Device.Tca955x
                     return;
                 }
 
+                if (((mask & 0x00FF) != 0) && ((cachedValue & 0x00FF) != (newValue & 0x00FF)))
+                {
+                    lowChanged = true;
+                }
+
+                if (((mask & 0xFF00) != 0) && ((cachedValue & 0xFF00) != (newValue & 0xFF00)))
+                {
+                    highChanged = true;
+                }
+
                 _gpioOutputCache = newValue;
+
+                if (lowChanged)
+                {
+                    byte lowValue = GetByteRegister(0, newValue);
+                    InternalWriteByte(GetRegisterIndex(0, Register.OutputPort), lowValue);
+                }
+
+                if (highChanged)
+                {
+                    byte highValue = GetByteRegister(BitsPerByte, newValue);
+                    InternalWriteByte(GetRegisterIndex(BitsPerByte, Register.OutputPort), highValue);
+                }
+
                 foreach (PinValuePair pinValuePair in pinValuePairs)
                 {
-                    byte register = GetRegisterIndex(pinValuePair.PinNumber, Register.OutputPort);
-                    byte value = GetByteRegister(pinValuePair.PinNumber, newValue);
-                    InternalWriteByte(register, value);
                     _pinValues[pinValuePair.PinNumber] = pinValuePair.PinValue;
                 }
             }
@@ -544,4 +592,5 @@ namespace Iot.Device.Tca955x
             base.Dispose(true);
         }
     }
+
 }
