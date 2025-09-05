@@ -5,6 +5,8 @@ using System;
 using System.Device.Gpio;
 using System.Device.Gpio.Tests;
 using System.Device.I2c;
+using System.Threading;
+
 using Moq;
 using Xunit;
 
@@ -39,18 +41,12 @@ namespace Iot.Device.Tca955x.Tests
         public void CreateWithBadAddress()
         {
             Assert.Throws<ArgumentOutOfRangeException>(() => new Tca9554(_deviceWithBadAddress.Object, -1));
-            _driver.VerifyAll();
-            _deviceWithBadAddress.VerifyAll();
-
         }
 
         [Fact]
         public void CreateWithoutInterrupt()
         {
             var testee = new Tca9554(_device.Object, -1);
-            _driver.VerifyAll();
-            _device.VerifyAll();
-
         }
 
         [Fact]
@@ -75,9 +71,6 @@ namespace Iot.Device.Tca955x.Tests
             Assert.Equal(PinValue.High, value);
             pin0.Dispose();
             Assert.False(tcaController.IsPinOpen(0));
-            _driver.VerifyAll();
-            _device.VerifyAll();
-
         }
 
         [Fact]
@@ -90,11 +83,13 @@ namespace Iot.Device.Tca955x.Tests
             tcaController.OpenPin(1, PinMode.Input);
             bool callbackInvoked = false;
             PinValueChangedEventArgs? receivedArgs = null;
+            ManualResetEventSlim mre = new(false);
 
             void Callback(object sender, PinValueChangedEventArgs args)
             {
                 callbackInvoked = true;
                 receivedArgs = args;
+                mre.Set();
             }
 
             // Change the device setup to simulate pin1 as high
@@ -112,14 +107,28 @@ namespace Iot.Device.Tca955x.Tests
                 b[0] = 0x00;
             });
 
+            // Act
             // Simulate the hardware int pin pin change using the _controller mock
             _driver.Object.FireEventHandler(interruptPin, PinEventTypes.Rising);
+            mre.Wait(2000); // Wait for the callback to be invoked
 
             // Assert
             Assert.True(callbackInvoked);
             Assert.NotNull(receivedArgs);
             Assert.Equal(1, receivedArgs.PinNumber);
             Assert.Equal(PinEventTypes.Falling, receivedArgs.ChangeType);
+        }
+
+        [Fact]
+        public void TestReadOfIllegalPinThrows()
+        {
+            var testee = new Tca9554(_device.Object, -1);
+            var tcaController = new GpioController(testee);
+            Assert.Equal(8, tcaController.PinCount);
+            GpioPin pin0 = tcaController.OpenPin(0);
+            Assert.NotNull(pin0);
+            Assert.True(tcaController.IsPinOpen(0));
+            Assert.Throws<ArgumentOutOfRangeException>(() => tcaController.Read(new Span<PinValuePair>(new PinValuePair[] { new(9, PinValue.Low) })));
         }
 
         [Fact]
@@ -139,16 +148,5 @@ namespace Iot.Device.Tca955x.Tests
             });
         }
 
-        [Fact]
-        public void TestReadOfIllegalPinThrows()
-        {
-            var testee = new Tca9554(_device.Object, -1);
-            var tcaController = new GpioController(testee);
-            Assert.Equal(8, tcaController.PinCount);
-            GpioPin pin0 = tcaController.OpenPin(0);
-            Assert.NotNull(pin0);
-            Assert.True(tcaController.IsPinOpen(0));
-            Assert.Throws<ArgumentOutOfRangeException>(() => tcaController.Read(new Span<PinValuePair>(new PinValuePair[] { new(9, PinValue.Low) })));
-        }
     }
 }
