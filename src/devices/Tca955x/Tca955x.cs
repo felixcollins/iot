@@ -15,7 +15,7 @@ namespace Iot.Device.Tca955x
     /// <summary>
     /// Base class for the Tca55x I2C I/O Expander
     /// </summary>
-    public abstract class Tca955x : GpioDriver, IGpioDriverBlockAccess
+    public abstract class Tca955x : GpioDriver
     {
         private readonly int _interrupt;
         private readonly Dictionary<int, PinValue> _pinValues = new Dictionary<int, PinValue>();
@@ -66,18 +66,26 @@ namespace Iot.Device.Tca955x
         /// Constructor for the Tca9555 I2C I/O Expander.
         /// </summary>
         /// <param name="device">The I2C device used for communication.</param>
-        /// <param name="interrupt">The input pin number that is connected to the interrupt.</param>
-        /// <param name="gpioController">The controller for the reset and interrupt pins. If not specified, the default controller will be used.</param>
+        /// <param name="interrupt">The input pin number that is connected to the interrupt.Must be set together with the <paramref name="gpioController"/></param>
+        /// <param name="gpioController">The controller for the interrupt pin. Must be set together with the <paramref name="interrupt"/></param>
         /// <param name="shouldDispose">True to dispose the <paramref name="gpioController"/> when this object is disposed</param>
-        protected Tca955x(I2cDevice device, int interrupt = -1, GpioController? gpioController = null, bool shouldDispose = true)
+        /// <param name="skipAddressCheck">True to skip checking the I2C address is in the valid range for the device. Only set this to true if you are using a compatible device with a different addresss scheme.</param>
+        protected Tca955x(I2cDevice device, int interrupt = -1, GpioController? gpioController = null, bool shouldDispose = true, bool skipAddressCheck = false)
         {
             _busDevice = device;
             _interrupt = interrupt;
 
-            if (_busDevice.ConnectionSettings.DeviceAddress < DefaultI2cAddress ||
-                _busDevice.ConnectionSettings.DeviceAddress > DefaultI2cAddress + AddressRange)
+            if (!skipAddressCheck &&
+                (_busDevice.ConnectionSettings.DeviceAddress < DefaultI2cAddress ||
+                _busDevice.ConnectionSettings.DeviceAddress > DefaultI2cAddress + AddressRange))
             {
                 throw new ArgumentOutOfRangeException(nameof(device), $"Address should be in Range {DefaultI2cAddress} to {DefaultI2cAddress + AddressRange} inclusive");
+            }
+
+            if ((_interrupt != -1 && gpioController is null) ||
+                (_interrupt == -1 && (gpioController is not null)))
+            {
+                throw new ArgumentException("gpioController and interrupt must be set together.");
             }
 
             if (_interrupt != -1)
@@ -254,7 +262,7 @@ namespace Iot.Device.Tca955x
         /// <summary>
         /// Reads the value of a set of pins
         /// </summary>
-        public void Read(Span<PinValuePair> pinValuePairs)
+        protected override void Read(Span<PinValuePair> pinValuePairs)
         {
             lock (_interruptHandlerLock)
             {
@@ -317,7 +325,7 @@ namespace Iot.Device.Tca955x
         /// <summary>
         /// Writes values to a set of pins
         /// </summary>
-        public void Write(ReadOnlySpan<PinValuePair> pinValuePairs)
+        protected override void Write(ReadOnlySpan<PinValuePair> pinValuePairs)
         {
             bool lowChanged = false;
             bool highChanged = false;
@@ -424,7 +432,7 @@ namespace Iot.Device.Tca955x
             // If the handler task is already running (not null), it means interrupts are being
             // fired reentrantly and we are already processing an interrupt.
             // OR we are reading/writing or configuring a pin.
-            // In this case record the interrupt, and return.
+            // In this case record the missed interrupt, and return.
             // We may miss an interrupt while busy, but because we have to slowly read the
             // i2c and detect a change in the returned input register data, not to mention run the
             // event handlers that the consumer of the library has signed up, we are likely
@@ -446,16 +454,13 @@ namespace Iot.Device.Tca955x
 
         private Task ProcessInterruptInTask()
         {
+            // Take a snapshot of the current interrupt pin configuration and last known input values
+            // so we can safely process them outside the lock in a background task.
+            var interruptPinsSnapshot = new Dictionary<int, PinEventTypes>(_interruptPins);
+            var interruptLastInputValuesSnapshot = new Dictionary<int, PinValue>(_interruptLastInputValues);
+
             Task processingTask = new Task(() =>
             {
-                Dictionary<int, PinEventTypes> interruptPinsSnapshot;
-                Dictionary<int, PinValue> interruptLastInputValuesSnapshot;
-                lock (_interruptHandlerLock)
-                {
-                    interruptPinsSnapshot = new Dictionary<int, PinEventTypes>(_interruptPins);
-                    interruptLastInputValuesSnapshot = new Dictionary<int, PinValue>(_interruptLastInputValues);
-                }
-
                 if (interruptPinsSnapshot.Count > 0)
                 {
                     Span<PinValuePair> pinValuePairs = stackalloc PinValuePair[interruptPinsSnapshot.Count];
@@ -637,6 +642,14 @@ namespace Iot.Device.Tca955x
         /// <inheritdoc/>
         protected override void Dispose(bool disposing)
         {
+            _controller?.UnregisterCallbackForPinValueChangedEvent(_interrupt, InterruptHandler);
+            _interruptPending = false;
+
+            // Make a copy of the task refernce to avoid a race condition
+            // between checking it for null and then waiting on it.
+            var localinterruptProcessingTask = _interruptProcessingTask;
+            localinterruptProcessingTask?.Wait();
+
             if (_shouldDispose)
             {
                 _controller?.Dispose();
