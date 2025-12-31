@@ -657,14 +657,6 @@ namespace Iot.Device.Tca955x
                 _controller?.Dispose();
                 _controller = null;
             }
-            else
-            {
-                // We don't own the interrupt controller, so we must unregister our interrupt handler
-                if (_controller != null && _interrupt != -1)
-                {
-                    _controller.UnregisterCallbackForPinValueChangedEvent(_interrupt, InterruptHandler);
-                }
-            }
 
             _busDevice?.Dispose();
 
